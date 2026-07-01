@@ -29,11 +29,11 @@ function normalizeCookies(rawCookies) {
   }));
 }
 
-async function clickByText(page, patterns) {
+async function clickByText(page, patterns, timeout = 4000) {
   for (const p of patterns) {
     try {
       const el = page.getByText(p).first();
-      await el.waitFor({ timeout: 4000 });
+      await el.waitFor({ timeout });
       await el.click();
       return true;
     } catch {}
@@ -41,11 +41,11 @@ async function clickByText(page, patterns) {
   return false;
 }
 
-async function clickByRole(page, patterns) {
+async function clickByRole(page, patterns, timeout = 4000) {
   for (const p of patterns) {
     try {
       const el = page.getByRole("button", { name: p }).first();
-      await el.waitFor({ timeout: 4000 });
+      await el.waitFor({ timeout });
       await el.click();
       return true;
     } catch {}
@@ -57,11 +57,7 @@ async function debugPage(page) {
   const title = await page.title().catch(() => "");
   const url = page.url();
   const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-  return {
-    url,
-    title,
-    bodyText: bodyText.slice(0, 3000)
-  };
+  return { url, title, bodyText: bodyText.slice(0, 3000) };
 }
 
 function makeAdminUrl(companyPageUrl) {
@@ -84,15 +80,13 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
     }
 
     const { companyPageUrl, message, cookies } = req.body;
+
     if (!companyPageUrl || !message || !cookies) {
       return res.status(400).json({
         success: false,
         error: "companyPageUrl, message and cookies are required"
       });
     }
-
-    const normalizedCookies = normalizeCookies(cookies);
-    const imagePath = req.file ? req.file.path : null;
 
     browser = await chromium.launch({
       headless: true,
@@ -104,7 +98,7 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
       locale: "en-US"
     });
 
-    await context.addCookies(normalizedCookies);
+    await context.addCookies(normalizeCookies(cookies));
     const page = await context.newPage();
 
     await page.goto("https://www.linkedin.com/feed/", {
@@ -122,31 +116,32 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
       });
     }
 
-    const adminUrl = makeAdminUrl(companyPageUrl);
-
-    await page.goto(adminUrl, {
+    await page.goto(makeAdminUrl(companyPageUrl), {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
     await page.waitForTimeout(12000);
 
-    const patterns = [
-      /start a post/i,
-      /create a post/i,
-      /share a post/i,
-      /post something/i,
-      /create/i,
-      /post/i,
-      /beitrag starten/i,
-      /beitrag erstellen/i,
-      /beitrag/i,
-      /erstellen/i
-    ];
+    let createClicked =
+      await clickByRole(page, [/create/i, /erstellen/i], 7000) ||
+      await clickByText(page, [/create/i, /erstellen/i], 7000);
 
-    let startClicked =
-      await clickByRole(page, patterns) ||
-      await clickByText(page, patterns);
+    await page.waitForTimeout(3000);
+
+    let startClicked = false;
+
+    if (createClicked) {
+      startClicked =
+        await clickByRole(page, [/post/i, /beitrag/i, /start a post/i, /create a post/i], 7000) ||
+        await clickByText(page, [/post/i, /beitrag/i, /start a post/i, /create a post/i], 7000);
+    }
+
+    if (!startClicked) {
+      startClicked =
+        await clickByRole(page, [/start a post/i, /create a post/i, /share a post/i, /post/i, /beitrag/i], 7000) ||
+        await clickByText(page, [/start a post/i, /create a post/i, /share a post/i, /post/i, /beitrag/i], 7000);
+    }
 
     if (!startClicked) {
       const debug = await debugPage(page);
@@ -167,18 +162,17 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
 
     await page.waitForTimeout(3000);
 
-    if (imagePath) {
-      await clickByRole(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i]);
-      await clickByText(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i]);
+    if (req.file) {
+      await clickByRole(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i], 8000);
+      await clickByText(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i], 8000);
 
       const fileInput = page.locator('input[type="file"]').first();
-      await fileInput.setInputFiles(imagePath);
+      await fileInput.setInputFiles(req.file.path);
+
       await page.waitForTimeout(12000);
     }
 
-    const postButton =
-      page.getByRole("button", { name: /^post$/i }).last();
-
+    const postButton = page.getByRole("button", { name: /^post$/i }).last();
     await postButton.waitFor({ timeout: 20000 });
     await postButton.click();
 
