@@ -11,56 +11,63 @@ const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
 
 function normalizeCookies(rawCookies) {
-  const cookies = typeof rawCookies === "string"
-    ? JSON.parse(rawCookies)
-    : rawCookies;
+  const cookies = typeof rawCookies === "string" ? JSON.parse(rawCookies) : rawCookies;
+  if (!Array.isArray(cookies)) throw new Error("cookies must be JSON array");
 
-  if (!Array.isArray(cookies)) {
-    throw new Error("cookies must be JSON array");
-  }
-
-  return cookies.map(c => {
-    const cookie = {
-      name: c.name,
-      value: c.value,
-      domain: c.domain === ".www.linkedin.com" ? ".linkedin.com" : c.domain,
-      path: c.path || "/",
-      httpOnly: !!c.httpOnly,
-      secure: !!c.secure
-    };
-
-    if (c.expirationDate) {
-      cookie.expires = Math.floor(c.expirationDate);
-    }
-
-    if (c.sameSite === "no_restriction") cookie.sameSite = "None";
-    else if (c.sameSite === "lax") cookie.sameSite = "Lax";
-    else if (c.sameSite === "strict") cookie.sameSite = "Strict";
-
-    return cookie;
-  });
+  return cookies.map(c => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain === ".www.linkedin.com" ? ".linkedin.com" : c.domain,
+    path: c.path || "/",
+    httpOnly: !!c.httpOnly,
+    secure: !!c.secure,
+    expires: c.expirationDate ? Math.floor(c.expirationDate) : undefined,
+    sameSite:
+      c.sameSite === "no_restriction" ? "None" :
+      c.sameSite === "lax" ? "Lax" :
+      c.sameSite === "strict" ? "Strict" : undefined
+  }));
 }
 
-async function clickIfExists(page, regex, timeout = 8000) {
-  try {
-    const el = page.getByText(regex).first();
-    await el.waitFor({ timeout });
-    await el.click();
-    return true;
-  } catch {
-    return false;
+async function clickByText(page, patterns) {
+  for (const p of patterns) {
+    try {
+      const el = page.getByText(p).first();
+      await el.waitFor({ timeout: 4000 });
+      await el.click();
+      return true;
+    } catch {}
   }
+  return false;
 }
 
-async function clickButtonIfExists(page, regex, timeout = 8000) {
-  try {
-    const btn = page.getByRole("button", { name: regex }).first();
-    await btn.waitFor({ timeout });
-    await btn.click();
-    return true;
-  } catch {
-    return false;
+async function clickByRole(page, patterns) {
+  for (const p of patterns) {
+    try {
+      const el = page.getByRole("button", { name: p }).first();
+      await el.waitFor({ timeout: 4000 });
+      await el.click();
+      return true;
+    } catch {}
   }
+  return false;
+}
+
+async function debugPage(page) {
+  const title = await page.title().catch(() => "");
+  const url = page.url();
+  const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+  return {
+    url,
+    title,
+    bodyText: bodyText.slice(0, 3000)
+  };
+}
+
+function makeAdminUrl(companyPageUrl) {
+  let url = companyPageUrl.split("?")[0].replace(/\/$/, "");
+  if (url.includes("/admin")) return url;
+  return url + "/admin/dashboard/";
 }
 
 app.get("/", (req, res) => {
@@ -72,13 +79,11 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
 
   try {
     const auth = req.headers.authorization || "";
-
     if (!auth.startsWith("Bearer ") || auth.replace("Bearer ", "") !== API_KEY) {
       return res.status(401).json({ success: false, error: "Unauthorized" });
     }
 
     const { companyPageUrl, message, cookies } = req.body;
-
     if (!companyPageUrl || !message || !cookies) {
       return res.status(400).json({
         success: false,
@@ -95,11 +100,11 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
     });
 
     const context = await browser.newContext({
-      viewport: { width: 1366, height: 900 }
+      viewport: { width: 1440, height: 1000 },
+      locale: "en-US"
     });
 
     await context.addCookies(normalizedCookies);
-
     const page = await context.newPage();
 
     await page.goto("https://www.linkedin.com/feed/", {
@@ -117,37 +122,43 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
       });
     }
 
-    await page.goto(companyPageUrl, {
+    const adminUrl = makeAdminUrl(companyPageUrl);
+
+    await page.goto(adminUrl, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
-    await page.waitForTimeout(6000);
+    await page.waitForTimeout(12000);
 
-    await clickIfExists(page, /view as admin/i, 10000);
-    await page.waitForTimeout(7000);
+    const patterns = [
+      /start a post/i,
+      /create a post/i,
+      /share a post/i,
+      /post something/i,
+      /create/i,
+      /post/i,
+      /beitrag starten/i,
+      /beitrag erstellen/i,
+      /beitrag/i,
+      /erstellen/i
+    ];
 
-    const startClicked =
-      await clickButtonIfExists(page, /start a post/i, 10000) ||
-      await clickIfExists(page, /start a post/i, 10000) ||
-      await clickButtonIfExists(page, /create a post/i, 10000) ||
-      await clickIfExists(page, /create a post/i, 10000) ||
-      await clickButtonIfExists(page, /post as/i, 10000) ||
-      await clickIfExists(page, /post as/i, 10000) ||
-      await clickButtonIfExists(page, /share a post/i, 10000) ||
-      await clickIfExists(page, /share a post/i, 10000) ||
-      await clickButtonIfExists(page, /^post$/i, 10000) ||
-      await clickIfExists(page, /^post$/i, 10000);
+    let startClicked =
+      await clickByRole(page, patterns) ||
+      await clickByText(page, patterns);
 
     if (!startClicked) {
+      const debug = await debugPage(page);
       await browser.close();
       return res.status(500).json({
         success: false,
-        error: "Could not find Start a post button"
+        error: "Could not find Start a post button",
+        debug
       });
     }
 
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(5000);
 
     const editor = page.locator('[contenteditable="true"]').first();
     await editor.waitFor({ timeout: 20000 });
@@ -157,21 +168,21 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
     await page.waitForTimeout(3000);
 
     if (imagePath) {
-      await clickButtonIfExists(page, /photo|image|media/i, 8000);
-      await clickIfExists(page, /photo|image|media/i, 8000);
+      await clickByRole(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i]);
+      await clickByText(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i]);
 
       const fileInput = page.locator('input[type="file"]').first();
       await fileInput.setInputFiles(imagePath);
-
       await page.waitForTimeout(12000);
     }
 
-    const postButton = page.getByRole("button", { name: /^post$/i }).last();
+    const postButton =
+      page.getByRole("button", { name: /^post$/i }).last();
+
     await postButton.waitFor({ timeout: 20000 });
     await postButton.click();
 
     await page.waitForTimeout(10000);
-
     await browser.close();
 
     return res.json({
@@ -181,7 +192,6 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
 
   } catch (error) {
     if (browser) await browser.close();
-
     return res.status(500).json({
       success: false,
       error: error.message
