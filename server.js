@@ -41,11 +41,22 @@ function normalizeCookies(rawCookies) {
   });
 }
 
-async function clickIfExists(page, regex, timeout = 5000) {
+async function clickIfExists(page, regex, timeout = 8000) {
   try {
     const el = page.getByText(regex).first();
     await el.waitFor({ timeout });
     await el.click();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function clickButtonIfExists(page, regex, timeout = 8000) {
+  try {
+    const btn = page.getByRole("button", { name: regex }).first();
+    await btn.waitFor({ timeout });
+    await btn.click();
     return true;
   } catch {
     return false;
@@ -83,7 +94,10 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
       args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: { width: 1366, height: 900 }
+    });
+
     await context.addCookies(normalizedCookies);
 
     const page = await context.newPage();
@@ -108,15 +122,22 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
       timeout: 60000
     });
 
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(6000);
 
-    await clickIfExists(page, /view as admin/i, 5000);
-    await page.waitForTimeout(4000);
+    await clickIfExists(page, /view as admin/i, 10000);
+    await page.waitForTimeout(7000);
 
     const startClicked =
-      await clickIfExists(page, /start a post/i, 8000) ||
-      await clickIfExists(page, /create a post/i, 8000) ||
-      await clickIfExists(page, /^post$/i, 8000);
+      await clickButtonIfExists(page, /start a post/i, 10000) ||
+      await clickIfExists(page, /start a post/i, 10000) ||
+      await clickButtonIfExists(page, /create a post/i, 10000) ||
+      await clickIfExists(page, /create a post/i, 10000) ||
+      await clickButtonIfExists(page, /post as/i, 10000) ||
+      await clickIfExists(page, /post as/i, 10000) ||
+      await clickButtonIfExists(page, /share a post/i, 10000) ||
+      await clickIfExists(page, /share a post/i, 10000) ||
+      await clickButtonIfExists(page, /^post$/i, 10000) ||
+      await clickIfExists(page, /^post$/i, 10000);
 
     if (!startClicked) {
       await browser.close();
@@ -126,26 +147,27 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
       });
     }
 
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(4000);
 
     const editor = page.locator('[contenteditable="true"]').first();
-    await editor.waitFor({ timeout: 15000 });
+    await editor.waitFor({ timeout: 20000 });
     await editor.click();
     await page.keyboard.insertText(message);
 
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
 
     if (imagePath) {
-      await clickIfExists(page, /photo|image|media/i, 5000);
+      await clickButtonIfExists(page, /photo|image|media/i, 8000);
+      await clickIfExists(page, /photo|image|media/i, 8000);
 
       const fileInput = page.locator('input[type="file"]').first();
       await fileInput.setInputFiles(imagePath);
 
-      await page.waitForTimeout(10000);
+      await page.waitForTimeout(12000);
     }
 
     const postButton = page.getByRole("button", { name: /^post$/i }).last();
-    await postButton.waitFor({ timeout: 15000 });
+    await postButton.waitFor({ timeout: 20000 });
     await postButton.click();
 
     await page.waitForTimeout(10000);
