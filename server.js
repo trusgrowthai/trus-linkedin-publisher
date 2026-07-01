@@ -9,12 +9,15 @@ app.use(express.json({ limit: "50mb" }));
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
-const LINKEDIN_COOKIES = process.env.LINKEDIN_COOKIES;
 
 function normalizeCookies(rawCookies) {
   const cookies = typeof rawCookies === "string"
     ? JSON.parse(rawCookies)
     : rawCookies;
+
+  if (!Array.isArray(cookies)) {
+    throw new Error("cookies must be JSON array");
+  }
 
   return cookies.map(c => {
     const cookie = {
@@ -38,11 +41,11 @@ function normalizeCookies(rawCookies) {
   });
 }
 
-async function clickIfExists(page, textRegex, timeout = 5000) {
+async function clickIfExists(page, regex, timeout = 5000) {
   try {
-    const locator = page.getByText(textRegex).first();
-    await locator.waitFor({ timeout });
-    await locator.click();
+    const el = page.getByText(regex).first();
+    await el.waitFor({ timeout });
+    await el.click();
     return true;
   } catch {
     return false;
@@ -54,38 +57,34 @@ app.get("/", (req, res) => {
 });
 
 app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
+  let browser;
+
   try {
     const auth = req.headers.authorization || "";
+
     if (!auth.startsWith("Bearer ") || auth.replace("Bearer ", "") !== API_KEY) {
       return res.status(401).json({ success: false, error: "Unauthorized" });
     }
 
-    const { companyPageUrl, message } = req.body;
+    const { companyPageUrl, message, cookies } = req.body;
 
-    if (!companyPageUrl || !message) {
+    if (!companyPageUrl || !message || !cookies) {
       return res.status(400).json({
         success: false,
-        error: "companyPageUrl and message are required"
+        error: "companyPageUrl, message and cookies are required"
       });
     }
 
-    if (!LINKEDIN_COOKIES) {
-      return res.status(500).json({
-        success: false,
-        error: "LINKEDIN_COOKIES env is missing"
-      });
-    }
-
-    const cookies = normalizeCookies(LINKEDIN_COOKIES);
+    const normalizedCookies = normalizeCookies(cookies);
     const imagePath = req.file ? req.file.path : null;
 
-    const browser = await chromium.launch({
+    browser = await chromium.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
     const context = await browser.newContext();
-    await context.addCookies(cookies);
+    await context.addCookies(normalizedCookies);
 
     const page = await context.newPage();
 
@@ -94,7 +93,7 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
       timeout: 60000
     });
 
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(5000);
 
     if (page.url().includes("/login")) {
       await browser.close();
@@ -112,7 +111,6 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
     await page.waitForTimeout(5000);
 
     await clickIfExists(page, /view as admin/i, 5000);
-
     await page.waitForTimeout(4000);
 
     const startClicked =
@@ -160,6 +158,8 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
     });
 
   } catch (error) {
+    if (browser) await browser.close();
+
     return res.status(500).json({
       success: false,
       error: error.message
