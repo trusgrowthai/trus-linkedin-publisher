@@ -29,41 +29,60 @@ function normalizeCookies(rawCookies) {
   }));
 }
 
-async function clickByText(page, patterns, timeout = 4000) {
-  for (const p of patterns) {
-    try {
-      const el = page.getByText(p).first();
-      await el.waitFor({ timeout });
-      await el.click();
-      return true;
-    } catch {}
-  }
-  return false;
-}
-
-async function clickByRole(page, patterns, timeout = 4000) {
-  for (const p of patterns) {
-    try {
-      const el = page.getByRole("button", { name: p }).first();
-      await el.waitFor({ timeout });
-      await el.click();
-      return true;
-    } catch {}
-  }
-  return false;
-}
-
-async function debugPage(page) {
-  const title = await page.title().catch(() => "");
-  const url = page.url();
-  const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-  return { url, title, bodyText: bodyText.slice(0, 3000) };
-}
-
 function makeAdminUrl(companyPageUrl) {
   let url = companyPageUrl.split("?")[0].replace(/\/$/, "");
   if (url.includes("/admin")) return url;
   return url + "/admin/dashboard/";
+}
+
+async function getDebug(page) {
+  const title = await page.title().catch(() => "");
+  const url = page.url();
+
+  const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+
+  const buttons = await page.locator("button").evaluateAll(btns =>
+    btns.map(b => ({
+      text: (b.innerText || "").trim(),
+      aria: b.getAttribute("aria-label"),
+      title: b.getAttribute("title")
+    })).slice(0, 80)
+  ).catch(() => []);
+
+  const links = await page.locator("a").evaluateAll(links =>
+    links.map(a => ({
+      text: (a.innerText || "").trim(),
+      href: a.href
+    })).slice(0, 80)
+  ).catch(() => []);
+
+  return {
+    url,
+    title,
+    buttons,
+    links,
+    bodyText: bodyText.slice(0, 2500)
+  };
+}
+
+async function clickSmart(page, patterns, timeout = 5000) {
+  for (const p of patterns) {
+    const locators = [
+      page.getByRole("button", { name: p }).first(),
+      page.getByRole("menuitem", { name: p }).first(),
+      page.getByRole("link", { name: p }).first(),
+      page.getByText(p).first()
+    ];
+
+    for (const locator of locators) {
+      try {
+        await locator.waitFor({ timeout });
+        await locator.click();
+        return true;
+      } catch {}
+    }
+  }
+  return false;
 }
 
 app.get("/", (req, res) => {
@@ -95,7 +114,9 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
 
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
-      locale: "en-US"
+      locale: "en-US",
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
     });
 
     await context.addCookies(normalizeCookies(cookies));
@@ -109,10 +130,12 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
     await page.waitForTimeout(5000);
 
     if (page.url().includes("/login")) {
+      const debug = await getDebug(page);
       await browser.close();
       return res.status(401).json({
         success: false,
-        error: "LinkedIn cookies expired or invalid"
+        error: "LinkedIn cookies expired or invalid",
+        debug
       });
     }
 
@@ -123,32 +146,60 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
 
     await page.waitForTimeout(12000);
 
-    let createClicked =
-      await clickByRole(page, [/create/i, /erstellen/i], 7000) ||
-      await clickByText(page, [/create/i, /erstellen/i], 7000);
+    let debugBefore = await getDebug(page);
 
-    await page.waitForTimeout(3000);
+    if (
+      debugBefore.title.toLowerCase().includes("access denied") ||
+      debugBefore.bodyText.toLowerCase().includes("rate limited") ||
+      debugBefore.bodyText.toLowerCase().includes("cloudflare")
+    ) {
+      await browser.close();
+      return res.status(429).json({
+        success: false,
+        error: "LinkedIn blocked Render IP with Cloudflare / rate limit",
+        debug: debugBefore
+      });
+    }
 
-    let startClicked = false;
+    const createClicked = await clickSmart(page, [
+      /^\+?\s*create$/i,
+      /^create$/i,
+      /^erstellen$/i,
+      /^erstellen\s*$/i
+    ], 8000);
+
+    await page.waitForTimeout(4000);
+
+    let postClicked = false;
 
     if (createClicked) {
-      startClicked =
-        await clickByRole(page, [/post/i, /beitrag/i, /start a post/i, /create a post/i], 7000) ||
-        await clickByText(page, [/post/i, /beitrag/i, /start a post/i, /create a post/i], 7000);
+      postClicked = await clickSmart(page, [
+        /^post$/i,
+        /post/i,
+        /^beitrag$/i,
+        /beitrag/i,
+        /start a post/i,
+        /create a post/i
+      ], 8000);
     }
 
-    if (!startClicked) {
-      startClicked =
-        await clickByRole(page, [/start a post/i, /create a post/i, /share a post/i, /post/i, /beitrag/i], 7000) ||
-        await clickByText(page, [/start a post/i, /create a post/i, /share a post/i, /post/i, /beitrag/i], 7000);
+    if (!postClicked) {
+      postClicked = await clickSmart(page, [
+        /start a post/i,
+        /create a post/i,
+        /share a post/i,
+        /^post$/i,
+        /beitrag/i
+      ], 8000);
     }
 
-    if (!startClicked) {
-      const debug = await debugPage(page);
+    if (!postClicked) {
+      const debug = await getDebug(page);
       await browser.close();
       return res.status(500).json({
         success: false,
-        error: "Could not find Start a post button",
+        error: "Could not find Start/Create/Post button",
+        createClicked,
         debug
       });
     }
@@ -163,18 +214,37 @@ app.post("/publish-linkedin", upload.single("image"), async (req, res) => {
     await page.waitForTimeout(3000);
 
     if (req.file) {
-      await clickByRole(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i], 8000);
-      await clickByText(page, [/photo/i, /image/i, /media/i, /foto/i, /bild/i, /medien/i], 8000);
+      await clickSmart(page, [
+        /photo/i,
+        /image/i,
+        /media/i,
+        /foto/i,
+        /bild/i,
+        /medien/i
+      ], 8000);
 
       const fileInput = page.locator('input[type="file"]').first();
       await fileInput.setInputFiles(req.file.path);
-
       await page.waitForTimeout(12000);
     }
 
-    const postButton = page.getByRole("button", { name: /^post$/i }).last();
-    await postButton.waitFor({ timeout: 20000 });
-    await postButton.click();
+    const publishClicked = await clickSmart(page, [
+      /^post$/i,
+      /^publish$/i,
+      /^veröffentlichen$/i,
+      /^beitrag posten$/i,
+      /^teilen$/i
+    ], 15000);
+
+    if (!publishClicked) {
+      const debug = await getDebug(page);
+      await browser.close();
+      return res.status(500).json({
+        success: false,
+        error: "Could not find final Publish/Post button",
+        debug
+      });
+    }
 
     await page.waitForTimeout(10000);
     await browser.close();
